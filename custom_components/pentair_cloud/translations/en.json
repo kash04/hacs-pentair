@@ -28,9 +28,14 @@
       "secondary_pump": { "name": "Secondary pump" },
       "water_level": { "name": "Water level" }
     },
+    "light": {
+      "zone": { "name": "Zone {zone}" }
+    },
     "sensor": {
       "average_salt_usage_per_day": { "name": "Average daily salt usage" },
       "battery_level": { "name": "Battery level" },
+      "controller_temperature": { "name": "Controller temperature" },
+      "current_draw": { "name": "Current draw" },
       "device_time": { "name": "Device time" },
       "last_report": { "name": "Last report" },
       "motor_speed": { "name": "Motor speed" },

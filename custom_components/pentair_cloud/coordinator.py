@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .cloud_write import merge_field_values, signed_put_sync
 from .const import DOMAIN
 from .helpers import diff_data
 
@@ -100,6 +101,20 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         if self.data and (data := self.data.get("data")):
             return data
         return None
+
+    async def async_set_fields(self, fields: dict[str, str]) -> dict[str, Any]:
+        """Write device fields with a SigV4-signed PUT.
+
+        Reserved ``rsv*`` and location fields are rejected. The local payload
+        is updated immediately, then a refresh confirms the device.
+        """
+        result = await self.hass.async_add_executor_job(
+            signed_put_sync, self.api, self.device_id, fields
+        )
+        if (updated := merge_field_values(self.data, fields)) is not None:
+            self.async_set_updated_data(updated)
+        await self.async_request_refresh()
+        return result
 
     async def _async_update_data(self):
         """Update data via library, refresh token if necessary."""
