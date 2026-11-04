@@ -127,6 +127,7 @@ def _intellivibe_sensors() -> tuple[PentairSensorEntityDescription, ...]:
             native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
             state_class=SensorStateClass.MEASUREMENT,
             translation_key="current_draw",
+            entity_category=EntityCategory.DIAGNOSTIC,
             value_fn=lambda data: sensor_number(data, CURRENT_FIELD),
         ),
         PentairSensorEntityDescription(

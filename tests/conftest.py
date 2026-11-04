@@ -6,6 +6,7 @@ Home Assistant is stubbed so importing the package does not require it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
 import sys
@@ -92,7 +93,18 @@ def _install_stubs() -> None:
         CURRENT="current", TEMPERATURE="temperature", TIMESTAMP="timestamp"
     )
     sensor.SensorEntity = type("SensorEntity", (), {})
-    sensor.SensorEntityDescription = type("SensorEntityDescription", (), {})
+    @dataclass(frozen=True, kw_only=True)
+    class SensorEntityDescription:
+        key: str
+        name: str | None = None
+        device_class: str | None = None
+        entity_category: str | None = None
+        entity_registry_enabled_default: bool = True
+        native_unit_of_measurement: str | None = None
+        state_class: str | None = None
+        translation_key: str | None = None
+
+    sensor.SensorEntityDescription = SensorEntityDescription
     sensor.SensorStateClass = _Attr(MEASUREMENT="measurement")
 
     dt = _module("homeassistant.util.dt")
