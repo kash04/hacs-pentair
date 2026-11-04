@@ -9,7 +9,8 @@ from typing import Any
 from pypentair import Pentair
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .cloud_write import merge_field_values, signed_put_sync
@@ -18,6 +19,9 @@ from .helpers import diff_data
 
 _LOGGER = logging.getLogger(__name__)
 UPDATE_INTERVAL = 30
+# The cloud can take several seconds to return a value after a write. Reading
+# it back right away returns the old value and the entity flips back.
+WRITE_REFRESH_DELAY = 10
 
 
 class PentairDataUpdateCoordinator(DataUpdateCoordinator):
@@ -87,6 +91,7 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         """Initialize."""
         self.api = client
         self.device_id = device_id
+        self._unsub_write_refresh: CALLBACK_TYPE | None = None
 
         super().__init__(
             hass,
@@ -106,15 +111,36 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         """Write device fields with a SigV4-signed PUT.
 
         Reserved ``rsv*`` and location fields are rejected. The local payload
-        is updated immediately, then a refresh confirms the device.
+        is updated immediately, then a delayed refresh confirms the device.
         """
         result = await self.hass.async_add_executor_job(
             signed_put_sync, self.api, self.device_id, fields
         )
         if (updated := merge_field_values(self.data, fields)) is not None:
             self.async_set_updated_data(updated)
-        await self.async_request_refresh()
+        self._schedule_write_refresh()
         return result
+
+    @callback
+    def _schedule_write_refresh(self) -> None:
+        """Refresh once the cloud has had time to apply the latest write."""
+        if self._unsub_write_refresh:
+            self._unsub_write_refresh()
+        self._unsub_write_refresh = async_call_later(
+            self.hass, WRITE_REFRESH_DELAY, self._async_write_refresh
+        )
+
+    async def _async_write_refresh(self, _now: Any) -> None:
+        """Run the delayed refresh scheduled after a write."""
+        self._unsub_write_refresh = None
+        await self.async_request_refresh()
+
+    async def async_shutdown(self) -> None:
+        """Cancel a pending write refresh before shutting down."""
+        if self._unsub_write_refresh:
+            self._unsub_write_refresh()
+            self._unsub_write_refresh = None
+        await super().async_shutdown()
 
     async def _async_update_data(self):
         """Update data via library, refresh token if necessary."""

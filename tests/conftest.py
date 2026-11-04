@@ -47,7 +47,9 @@ def _install_stubs() -> None:
     const.UnitOfTemperature = _Attr(CELSIUS="°C", FAHRENHEIT="°F")
 
     core = _module("homeassistant.core")
+    core.CALLBACK_TYPE = object
     core.HomeAssistant = type("HomeAssistant", (), {})
+    core.callback = lambda func: func
 
     exceptions = _module("homeassistant.exceptions")
     exceptions.ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
@@ -59,6 +61,9 @@ def _install_stubs() -> None:
 
     device_registry = _module("homeassistant.helpers.device_registry")
     device_registry.DeviceEntry = type("DeviceEntry", (), {})
+
+    event = _module("homeassistant.helpers.event")
+    event.async_call_later = None
 
     entity = _module("homeassistant.helpers.entity")
     entity.DeviceInfo = dict
