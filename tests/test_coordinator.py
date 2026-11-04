@@ -7,6 +7,7 @@ from typing import Any
 
 from pentair_cloud import coordinator as coordinator_module
 from pentair_cloud.coordinator import (
+    WRITE_HOLD,
     WRITE_REFRESH_DELAY,
     PentairDeviceDataUpdateCoordinator,
 )
@@ -47,6 +48,7 @@ def _coordinator(
     coordinator.api = object()
     coordinator.device_id = "example"
     coordinator._unsub_write_refresh = None
+    coordinator._held_fields = {}
     coordinator.data = {"data": {"fields": {"l1d8": {"value": "0"}}}}
 
     def set_updated_data(data: dict[str, Any]) -> None:
@@ -86,3 +88,49 @@ def test_new_write_replaces_pending_refresh(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert [entry["cancelled"] for entry in scheduled] == [True, False]
     assert coordinator.data["data"]["fields"]["l1d8"]["value"] == "0"
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _polled(value: str) -> dict[str, Any]:
+    return {"data": {"fields": {"l1d3": {"value": value}, "l1d8": {"value": "1"}}}}
+
+
+def _held_value(device: dict[str, Any]) -> str:
+    return device["data"]["fields"]["l1d3"]["value"]
+
+
+def test_stale_poll_keeps_written_value_until_hold_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _scheduled, _calls = _coordinator(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(coordinator_module, "time", clock)
+
+    asyncio.run(coordinator.async_set_fields({"l1d3": "3"}))
+
+    clock.now += WRITE_HOLD - 1
+    device = coordinator._apply_held_fields(_polled("4"))
+    assert _held_value(device) == "3"
+    assert device["data"]["fields"]["l1d8"]["value"] == "1"
+
+    clock.now += 1
+    assert _held_value(coordinator._apply_held_fields(_polled("4"))) == "4"
+    assert coordinator._held_fields == {}
+
+
+def test_confirmed_poll_ends_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _scheduled, _calls = _coordinator(monkeypatch)
+    monkeypatch.setattr(coordinator_module, "time", _Clock())
+
+    asyncio.run(coordinator.async_set_fields({"l1d3": "3"}))
+
+    assert _held_value(coordinator._apply_held_fields(_polled("3"))) == "3"
+    assert coordinator._held_fields == {}
+    assert _held_value(coordinator._apply_held_fields(_polled("5"))) == "5"

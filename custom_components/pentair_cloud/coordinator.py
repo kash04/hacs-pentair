@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import time
 from typing import Any
 
 from pypentair import Pentair
@@ -22,6 +23,8 @@ UPDATE_INTERVAL = 30
 # The cloud can take several seconds to return a value after a write. Reading
 # it back right away returns the old value and the entity flips back.
 WRITE_REFRESH_DELAY = 10
+# Written values win over polled values that still disagree for this long.
+WRITE_HOLD = 15
 
 
 class PentairDataUpdateCoordinator(DataUpdateCoordinator):
@@ -92,6 +95,7 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         self.api = client
         self.device_id = device_id
         self._unsub_write_refresh: CALLBACK_TYPE | None = None
+        self._held_fields: dict[str, tuple[str, float]] = {}
 
         super().__init__(
             hass,
@@ -116,6 +120,9 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         result = await self.hass.async_add_executor_job(
             signed_put_sync, self.api, self.device_id, fields
         )
+        expires = time.monotonic() + WRITE_HOLD
+        for key, value in fields.items():
+            self._held_fields[key] = (str(value), expires)
         if (updated := merge_field_values(self.data, fields)) is not None:
             self.async_set_updated_data(updated)
         self._schedule_write_refresh()
@@ -134,6 +141,23 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         """Run the delayed refresh scheduled after a write."""
         self._unsub_write_refresh = None
         await self.async_request_refresh()
+
+    def _apply_held_fields(self, device: dict[str, Any]) -> dict[str, Any]:
+        """Keep recent writes until the cloud returns them or the hold ends."""
+        now = time.monotonic()
+        fields = (device.get("data") or {}).get("fields") or {}
+        held: dict[str, str] = {}
+        for key, (value, expires) in list(self._held_fields.items()):
+            current = fields.get(key)
+            if isinstance(current, dict):
+                current = current.get("value")
+            if expires <= now or str(current) == value:
+                del self._held_fields[key]
+            else:
+                held[key] = value
+        if held and (merged := merge_field_values(device, held)) is not None:
+            return merged
+        return device
 
     async def async_shutdown(self) -> None:
         """Cancel a pending write refresh before shutting down."""
@@ -154,7 +178,7 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
                         self.device_id,
                         diff_data(self.data, device) or "no changes",
                     )
-                return device
+                return self._apply_held_fields(device)
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.exception("Unknown exception while updating Pentair data")
             raise UpdateFailed(err) from err
