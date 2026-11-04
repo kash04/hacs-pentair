@@ -13,11 +13,23 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory, UnitOfMass
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfElectricCurrent,
+    UnitOfMass,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import PentairConfigEntry
+from .clw1 import (
+    CURRENT_FIELD,
+    DEVICE_TYPE as INTELLIVIBE,
+    TEMPERATURE_FIELD,
+    reported_unit,
+    sensor_number,
+)
 from .entity import PentairEntity
 from .helpers import convert_timestamp, get_field_value
 
@@ -60,6 +72,20 @@ async def async_setup_entry(
                     device_id=data["deviceId"],
                 )
             )
+            if data.get("deviceType") == INTELLIVIBE:
+                # Zone fields are lights. Skip the generic field dump so
+                # reserved rsv* values (including location) are not recorded
+                # as sensors. Current and temperature are added explicitly.
+                for description in _intellivibe_sensors():
+                    entities.append(
+                        PentairSensorEntity(
+                            coordinator=device_coordinator,
+                            config_entry=config_entry,
+                            description=description,
+                            device_id=data["deviceId"],
+                        )
+                    )
+                continue
             for field, field_data in data.get("fields", {}).items():
                 if not isinstance(field_data, dict):
                     continue
@@ -92,6 +118,28 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
+def _intellivibe_sensors() -> tuple[PentairSensorEntityDescription, ...]:
+    """Current draw and controller temperature for an IntelliVibe."""
+    return (
+        PentairSensorEntityDescription(
+            key=CURRENT_FIELD,
+            device_class=SensorDeviceClass.CURRENT,
+            native_unit_of_measurement=UnitOfElectricCurrent.MILLIAMPERE,
+            state_class=SensorStateClass.MEASUREMENT,
+            translation_key="current_draw",
+            value_fn=lambda data: sensor_number(data, CURRENT_FIELD),
+        ),
+        PentairSensorEntityDescription(
+            key=TEMPERATURE_FIELD,
+            device_class=SensorDeviceClass.TEMPERATURE,
+            native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+            state_class=SensorStateClass.MEASUREMENT,
+            translation_key="controller_temperature",
+            value_fn=lambda data: sensor_number(data, TEMPERATURE_FIELD),
+        ),
+    )
+
+
 class PentairSensorEntity(PentairEntity, SensorEntity):
     """Pentair sensor entity."""
 
@@ -103,3 +151,15 @@ class PentairSensorEntity(PentairEntity, SensorEntity):
         if isinstance(device_data := self.get_device(), dict):
             return self.entity_description.value_fn(device_data)
         return None
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Prefer the unit reported by IntelliVibe field metadata."""
+        default = super().native_unit_of_measurement
+        if self.entity_description.key not in (CURRENT_FIELD, TEMPERATURE_FIELD):
+            return default
+        if not isinstance(default, str) or not isinstance(
+            device := self.get_device(), dict
+        ):
+            return default
+        return reported_unit(device, self.entity_description.key, default)
