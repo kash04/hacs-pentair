@@ -18,6 +18,20 @@
 
 Home Assistant integration for Pentair Home devices.
 
+## IntelliVibe
+
+IntelliVibe (`CLW1`) pool light controllers expose one light for each of the four zones:
+
+- On / off
+- Brightness from 10% to 100%
+- RGB color
+- White color temperature from 2000 K to 12000 K
+- Color shows: Party, Romance, Caribbean, American, Royal, Deep Blue Sea, Rainbow, Stormy Night, Rave, Northern Lights, Candyland, and Lava Flow
+
+Choosing a color clears the active show. Choosing a show clears the color. The controller also reports current draw (mA) and controller temperature.
+
+Reserved device fields (`rsv*`, including location) are never written.
+
 <!-- BEGIN AUTO-GENERATED INSTALLATION -->
 
 ## ⬇️ Installation

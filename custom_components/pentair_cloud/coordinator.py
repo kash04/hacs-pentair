@@ -4,19 +4,27 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
+import time
 from typing import Any
 
 from pypentair import Pentair
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .cloud_write import merge_field_values, signed_put_sync
 from .const import DOMAIN
 from .helpers import diff_data
 
 _LOGGER = logging.getLogger(__name__)
 UPDATE_INTERVAL = 30
+# The cloud can take several seconds to return a value after a write. Reading
+# it back right away returns the old value and the entity flips back.
+WRITE_REFRESH_DELAY = 10
+# Written values win over polled values that still disagree for this long.
+WRITE_HOLD = 15
 
 
 class PentairDataUpdateCoordinator(DataUpdateCoordinator):
@@ -86,6 +94,8 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
         """Initialize."""
         self.api = client
         self.device_id = device_id
+        self._unsub_write_refresh: CALLBACK_TYPE | None = None
+        self._held_fields: dict[str, tuple[str, float]] = {}
 
         super().__init__(
             hass,
@@ -101,6 +111,61 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
             return data
         return None
 
+    async def async_set_fields(self, fields: dict[str, str]) -> dict[str, Any]:
+        """Write device fields with a SigV4-signed PUT.
+
+        Reserved ``rsv*`` and location fields are rejected. The local payload
+        is updated immediately, then a delayed refresh confirms the device.
+        """
+        result = await self.hass.async_add_executor_job(
+            signed_put_sync, self.api, self.device_id, fields
+        )
+        expires = time.monotonic() + WRITE_HOLD
+        for key, value in fields.items():
+            self._held_fields[key] = (str(value), expires)
+        if (updated := merge_field_values(self.data, fields)) is not None:
+            self.async_set_updated_data(updated)
+        self._schedule_write_refresh()
+        return result
+
+    @callback
+    def _schedule_write_refresh(self) -> None:
+        """Refresh once the cloud has had time to apply the latest write."""
+        if self._unsub_write_refresh:
+            self._unsub_write_refresh()
+        self._unsub_write_refresh = async_call_later(
+            self.hass, WRITE_REFRESH_DELAY, self._async_write_refresh
+        )
+
+    async def _async_write_refresh(self, _now: Any) -> None:
+        """Run the delayed refresh scheduled after a write."""
+        self._unsub_write_refresh = None
+        await self.async_request_refresh()
+
+    def _apply_held_fields(self, device: dict[str, Any]) -> dict[str, Any]:
+        """Keep recent writes until the cloud returns them or the hold ends."""
+        now = time.monotonic()
+        fields = (device.get("data") or {}).get("fields") or {}
+        held: dict[str, str] = {}
+        for key, (value, expires) in list(self._held_fields.items()):
+            current = fields.get(key)
+            if isinstance(current, dict):
+                current = current.get("value")
+            if expires <= now or str(current) == value:
+                del self._held_fields[key]
+            else:
+                held[key] = value
+        if held and (merged := merge_field_values(device, held)) is not None:
+            return merged
+        return device
+
+    async def async_shutdown(self) -> None:
+        """Cancel a pending write refresh before shutting down."""
+        if self._unsub_write_refresh:
+            self._unsub_write_refresh()
+            self._unsub_write_refresh = None
+        await super().async_shutdown()
+
     async def _async_update_data(self):
         """Update data via library, refresh token if necessary."""
         try:
@@ -113,7 +178,7 @@ class PentairDeviceDataUpdateCoordinator(DataUpdateCoordinator):
                         self.device_id,
                         diff_data(self.data, device) or "no changes",
                     )
-                return device
+                return self._apply_held_fields(device)
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.exception("Unknown exception while updating Pentair data")
             raise UpdateFailed(err) from err
